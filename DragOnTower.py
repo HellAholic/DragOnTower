@@ -16,7 +16,7 @@
 
 from typing import Optional
 
-from PyQt6.QtCore import QObject
+from PyQt6.QtCore import QObject, QTimer
 
 from UM.Extension import Extension
 from UM.Application import Application
@@ -69,23 +69,37 @@ class ProtectedSceneNode(SceneNode):
             if not opengl:
                 return False
             ProtectedSceneNode.shader = opengl.createShaderProgram(
-                Resources.getPath(Resources.Shaders, "object.shader"))
+                Resources.getPath(Resources.Shaders, "transparent_object.shader"))
             if not ProtectedSceneNode.shader:
                 return False
+            # Prevent Cura's per-frame diffuse_color binding from overriding our color.
+            ProtectedSceneNode.shader.removeBinding("diffuse_color")
 
-        # Change color based on collision state
+        # Read collision state directly from BuildVolume each frame so it is always
+        # in sync with the build-volume rebuild, with no signal timing concerns.
+        try:
+            build_volume = Application.getInstance().getBuildVolume()
+            if build_volume:
+                ProtectedSceneNode.collision_detected = build_volume.hasErrors()
+        except Exception:
+            pass
+
         if ProtectedSceneNode.collision_detected:
             color = Color(1.0, 0.0, 0.0, 1.0)  # Red when colliding
         else:
             color = Color(0.0, 0.8, 0.9, 1.0)  # Cyan when valid
-        
-        ProtectedSceneNode.shader.setUniformValue("u_diffuseColor", color)
-        
+
+        try:
+            ProtectedSceneNode.shader.setUniformValue("u_diffuseColor", color)
+        except Exception:
+            ProtectedSceneNode.shader = None
+            return False
+
         batch = renderer.getNamedBatch("prime_tower_visual")
         if not batch:
             batch = renderer.createRenderBatch(shader=ProtectedSceneNode.shader)
             renderer.addRenderBatch(batch, name="prime_tower_visual")
-        
+
         batch.addItem(self.getWorldTransformation(copy=False), self.getMeshData())
         return True
 
@@ -253,12 +267,17 @@ class DragOnTower(Extension, QObject):
                 if self._build_volume:
                     try:
                         self._build_volume.raftThicknessChanged.disconnect(self._checkTowerCollision)
+                        self._build_volume.meshDataChanged.disconnect(self._onBuildVolumeRebuilt)
                     except:
                         pass
                 
                 self._build_volume = self._application.getBuildVolume()
                 if self._build_volume:
                     self._build_volume.raftThicknessChanged.connect(self._checkTowerCollision)
+                    # meshDataChanged fires inside rebuild() via setMeshData().
+                    # Deferring with singleShot(0) ensures _has_errors is set
+                    # (rebuild continues after the signal) before we read it.
+                    self._build_volume.meshDataChanged.connect(self._onBuildVolumeRebuilt)
         
         finally:
             # Turn signal back to normal
@@ -280,6 +299,14 @@ class DragOnTower(Extension, QObject):
         if source == self._prime_tower_node:
             self._updateSettingsFromNode()
     
+    def _onBuildVolumeRebuilt(self, _=None):
+        """Called when BuildVolume.setMeshData() fires during rebuild().
+
+        rebuild() calls setMeshData() early, then sets _has_errors later.
+        singleShot(0) defers our check until after rebuild() fully completes.
+        """
+        QTimer.singleShot(0, self._checkTowerCollision)
+
     def _onSceneObjectsChanged(self, source: SceneNode):
         """Check if prime tower should be recreated or visibility changed."""
         if self._creating_prime_tower or self._settings_update_in_progress:
