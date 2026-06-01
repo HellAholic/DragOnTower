@@ -65,8 +65,13 @@ class ProtectedSceneNode(SceneNode):
     def render(self, renderer):
         """Custom render method to apply cyan color to prime tower with proper shading."""
         if not ProtectedSceneNode.shader:
-            ProtectedSceneNode.shader = OpenGL.getInstance().createShaderProgram(
+            opengl = OpenGL.getInstance()
+            if not opengl:
+                return False
+            ProtectedSceneNode.shader = opengl.createShaderProgram(
                 Resources.getPath(Resources.Shaders, "object.shader"))
+            if not ProtectedSceneNode.shader:
+                return False
 
         # Change color based on collision state
         if ProtectedSceneNode.collision_detected:
